@@ -676,6 +676,29 @@ unsafe fn fix_row(mut w: usize, nf: u32, wpos: usize) -> usize {
     w
 }
 
+/// The output offset of the `,` that ends the record's `width`-th field: `q` is just past the record's `["`.
+/// Fields are JSON strings, so a field ends at the first `"` not escaped by a backslash.
+#[inline(never)]
+unsafe fn find_wpos(mut q: usize, width: u32) -> usize {
+    let mut n = 0u32;
+    loop {
+        let b = rd(q);
+        if b == b'\\' {
+            q += 2;
+            continue;
+        }
+        if b == b'"' {
+            n += 1;
+            if n == width {
+                return q + 1;
+            }
+            q += 3; // `","`
+            continue;
+        }
+        q += 1;
+    }
+}
+
 /// One record by the per-field reader (with `W`, `LINE` as the step's): ONE_DONE with RETP after it, or a step status.
 #[inline(never)]
 unsafe fn slow_one(p: usize, w: usize, line: u32, e: usize) -> i32 {
@@ -698,9 +721,9 @@ unsafe fn slow_one(p: usize, w: usize, line: u32, e: usize) -> i32 {
 
 /// Reads records from [p, e) (e: the window's end, `eof` when the file ends there). Returns NEED (RETP: the first
 /// byte not read, a record's start), ENDED (RETP: the text's closing quote), FLUSH (the output window is full,
-/// RETP as for NEED) or ABORT. Plain records are read 64 bytes at a time; the first record and any record with
-/// anything rare in it (a stray CR, quote junk, a quote that never closes, a \\u escape, the window's end) are read
-/// by `slow`.
+/// RETP as for NEED) or ABORT. Plain records are read 64 bytes at a time, one record after another in the same
+/// blocks; the first record and any record with anything rare in it (a stray CR, quote junk, a quote that never
+/// closes, a \\u escape, the window's end) are read by `slow`.
 #[no_mangle]
 pub unsafe extern "C" fn step(p0: usize, e: usize, eof: i32) -> i32 {
     EOF = eof != 0;
@@ -712,16 +735,25 @@ pub unsafe extern "C" fn step(p0: usize, e: usize, eof: i32) -> i32 {
     let comma = u8x16_splat(b',');
     let bs = u8x16_splat(b'\\');
     let qt = u8x16_splat(b'"');
-    'records: loop {
+    'outer: loop {
         if w >= flush_at {
             W = w;
             LINE = line;
             RETP = p;
             return FLUSH;
         }
+        if K == 0 || p + 64 > safe_e {
+            let r = slow_one(p, w, line, e);
+            if r != ONE_DONE {
+                return r;
+            }
+            p = RETP;
+            w = W;
+            line = LINE;
+            continue 'outer;
+        }
         // lines with no characters are no records
-        let mut rare = K == 0 || p + 64 > safe_e;
-        while !rare {
+        loop {
             let b = rd(p);
             if b == b'\\' {
                 let c = rd(p + 1);
@@ -743,125 +775,128 @@ pub unsafe extern "C" fn step(p0: usize, e: usize, eof: i32) -> i32 {
             }
             break;
         }
-        let rec_p = p;
-        let save_w = w;
-        let save_line = line;
-        if !rare {
-            let width = WIDTH;
-            REC_LINE = line;
-            REC_K = K;
-            if K >= 2 {
-                wr(w, b',');
-                w += 1;
+        if p + 64 > safe_e {
+            continue 'outer;
+        }
+        let width = WIDTH;
+        let mut kk = K;
+        let mut rec_p = p;
+        let mut save_w = w;
+        let mut save_line = line;
+        if kk >= 2 {
+            wr(w, b',');
+            w += 1;
+        }
+        *(w as *mut u16) = 0x225b; // ["
+        w += 2;
+        let mut nf: u32 = 1;
+        let mut wpos: usize = 0;
+        let mut quoted = false;
+        let mut last = p; // the next input byte not yet copied
+        let mut skip = p; // specials before this are read already
+        let mut base = p;
+        let mut carry: u64 = 0;
+        'blocks: while base < safe_e {
+            let mut cm: u64 = 0;
+            let mut bm: u64 = 0;
+            let mut qm: u64 = 0;
+            let mut k = 0;
+            while k < 4 {
+                let v = v128_load((base + 16 * k) as *const v128);
+                cm |= (i8x16_bitmask(i8x16_eq(v, comma)) as u64) << (16 * k);
+                bm |= (i8x16_bitmask(i8x16_eq(v, bs)) as u64) << (16 * k);
+                qm |= (i8x16_bitmask(i8x16_eq(v, qt)) as u64) << (16 * k);
+                k += 1;
             }
-            *(w as *mut u16) = 0x225b; // ["
-            w += 2;
-            let mut nf: u32 = 1;
-            let mut wpos: usize = 0;
-            let mut quoted = false;
-            let mut last = p; // the next input byte not yet copied
-            let mut skip = p; // specials before this are inside escapes already read
-            let mut base = p;
-            let mut endq: usize = 0; // where the record's line break or the text's end starts (0: not yet)
-            let mut next: usize = 0;
-            let mut carry: u64 = 0;
-            'blocks: while base < safe_e {
-                let mut cm: u64 = 0;
-                let mut bm: u64 = 0;
-                let mut qm: u64 = 0;
-                let mut k = 0;
-                while k < 4 {
-                    let v = v128_load((base + 16 * k) as *const v128);
-                    cm |= (i8x16_bitmask(i8x16_eq(v, comma)) as u64) << (16 * k);
-                    bm |= (i8x16_bitmask(i8x16_eq(v, bs)) as u64) << (16 * k);
-                    qm |= (i8x16_bitmask(i8x16_eq(v, qt)) as u64) << (16 * k);
-                    k += 1;
-                }
-                let prevbs = (bm << 1) | carry;
-                carry = bm >> 63;
-                if bm & prevbs == 0 {
-                    qm &= !prevbs; // a quote right after a backslash is that escape's own
-                }
-                let mut om = bm | qm;
-                if base + 64 > safe_e {
-                    let lm = (1u64 << (safe_e - base)) - 1;
-                    cm &= lm;
-                    om &= lm;
-                }
-                loop {
-                    if skip > base {
-                        let d = skip - base;
-                        let keep = if d >= 64 { 0 } else { !((1u64 << d) - 1) };
-                        cm &= keep;
-                        om &= keep;
-                    }
+            let prevbs = (bm << 1) | carry;
+            carry = bm >> 63;
+            if bm & prevbs == 0 {
+                qm &= !prevbs; // a quote right after a backslash is that escape's own
+            }
+            let mut om = bm | qm;
+            if base + 64 > safe_e {
+                let lm = (1u64 << (safe_e - base)) - 1;
+                cm &= lm;
+                om &= lm;
+            }
+            if skip > base {
+                let d = skip - base;
+                let keep = if d >= 64 { 0 } else { !0u64 << d };
+                cm &= keep;
+                om &= keep;
+            }
+            // specials before x are read already: off the masks (and off the next block's, past this one)
+            macro_rules! clr {
+                ($x:expr) => {{
+                    let x = $x;
+                    skip = x;
+                    let d = x - base;
+                    let keep = if d >= 64 { 0 } else { !0u64 << d };
+                    cm &= keep;
+                    om &= keep;
+                }};
+            }
+            loop {
+                if !quoted {
                     let below = if om == 0 { !0u64 } else { (om & om.wrapping_neg()) - 1 };
                     let mut c = cm & below;
                     cm &= !below;
-                    if !quoted {
-                        while c != 0 {
-                            let t = base + c.trailing_zeros() as usize;
-                            c &= c - 1;
-                            seg(w, last, t - last);
-                            w += t - last;
-                            if nf == width {
-                                wpos = w + 1;
-                            }
-                            *(w as *mut u32) = 0x0022_2c22;
-                            w += 3;
-                            nf += 1;
-                            last = t + 1;
-                        }
+                    nf += c.count_ones();
+                    while c != 0 {
+                        let t = base + c.trailing_zeros() as usize;
+                        c &= c - 1;
+                        seg(w, last, t - last);
+                        w += t - last;
+                        *(w as *mut u32) = 0x0022_2c22;
+                        w += 3;
+                        last = t + 1;
                     }
-                    if om == 0 {
-                        break;
+                }
+                if om == 0 {
+                    break;
+                }
+                let t = base + om.trailing_zeros() as usize;
+                om &= om - 1;
+                let b = rd(t);
+                // the record's end: endq where its line break (or the text's end) starts, next after it
+                let endq: usize;
+                let next: usize;
+                if b == b'"' {
+                    if quoted {
+                        break 'blocks; // the quote never closes
                     }
-                    let t = base + om.trailing_zeros() as usize;
-                    om &= om - 1;
-                    let b = rd(t);
-                    if b == b'"' {
-                        if quoted {
-                            rare = true; // the quote never closes
-                            break 'blocks;
-                        }
-                        endq = t;
-                        next = t;
-                        break 'blocks;
-                    }
+                    endq = t;
+                    next = t;
+                } else {
                     let c = rd(t + 1);
                     if !quoted {
                         if c == b'n' {
                             endq = t;
                             next = t + 2;
-                            break 'blocks;
-                        }
-                        if c == b'r' {
+                        } else if c == b'r' {
                             if rd(t + 2) == b'\\' && rd(t + 3) == b'n' {
                                 endq = t;
                                 next = t + 4;
+                            } else {
+                                break 'blocks; // stray CR
+                            }
+                        } else {
+                            if c == b'"' && t == last {
+                                // a field opening with a quote
+                                quoted = true;
+                                last = t + 2;
+                            } else if c == b'u' {
                                 break 'blocks;
                             }
-                            rare = true; // stray CR
-                            break 'blocks;
+                            clr!(t + 2);
+                            continue;
                         }
-                        if c == b'"' && t == last {
-                            // a field opening with a quote
-                            quoted = true;
-                            last = t + 2;
-                        } else if c == b'u' {
-                            rare = true;
-                            break 'blocks;
-                        }
-                        skip = t + 2;
-                        continue;
-                    }
-                    // inside quotes
-                    if c == b'"' {
+                    } else if c == b'"' {
                         if rd(t + 2) == b'\\' && rd(t + 3) == b'"' {
                             seg(w, last, t + 2 - last);
                             w += t + 2 - last;
                             last = t + 4;
-                            skip = t + 4;
+                            clr!(t + 4);
                             continue;
                         }
                         // the closing quote: a comma, a line break or the text's end must follow
@@ -872,61 +907,45 @@ pub unsafe extern "C" fn step(p0: usize, e: usize, eof: i32) -> i32 {
                         let x = rd(q);
                         if x == b',' {
                             quoted = false;
-                            if nf == width {
-                                wpos = w + 1;
-                            }
                             *(w as *mut u32) = 0x0022_2c22;
                             w += 3;
                             nf += 1;
                             last = q + 1;
-                            skip = q + 1;
+                            clr!(q + 1);
                             continue;
                         }
                         if x == b'"' {
                             endq = t;
                             next = q;
-                            break 'blocks;
+                        } else if x == b'\\' && rd(q + 1) == b'n' {
+                            endq = t;
+                            next = q + 2;
+                        } else if x == b'\\' && rd(q + 1) == b'r' && rd(q + 2) == b'\\' && rd(q + 3) == b'n' {
+                            endq = t;
+                            next = q + 4;
+                        } else {
+                            break 'blocks; // quote junk
                         }
-                        if x == b'\\' {
-                            let y = rd(q + 1);
-                            if y == b'n' {
-                                endq = t;
-                                next = q + 2;
-                                break 'blocks;
-                            }
-                            if y == b'r' && rd(q + 2) == b'\\' && rd(q + 3) == b'n' {
-                                endq = t;
-                                next = q + 4;
-                                break 'blocks;
-                            }
-                        }
-                        rare = true; // quote junk
-                        break 'blocks;
-                    }
-                    if c == b'n' {
+                    } else if c == b'n' {
                         line += 1;
-                        skip = t + 2;
                         continue;
-                    }
-                    if c == b'r' {
+                    } else if c == b'r' {
                         seg(w, last, t - last);
                         w += t - last;
                         *(w as *mut u16) = 0x6e5c; // \\n
                         w += 2;
                         line += 1;
                         last = if rd(t + 2) == b'\\' && rd(t + 3) == b'n' { t + 4 } else { t + 2 };
-                        skip = last;
+                        clr!(last);
+                        continue;
+                    } else if c == b'u' {
+                        break 'blocks;
+                    } else {
+                        clr!(t + 2);
                         continue;
                     }
-                    if c == b'u' {
-                        rare = true;
-                        break 'blocks;
-                    }
-                    skip = t + 2;
                 }
-                base += 64;
-            }
-            if !rare && endq != 0 {
+                // the record ends
                 seg(w, last, endq - last);
                 w += endq - last;
                 *(w as *mut u16) = 0x5d22; // "]
@@ -934,24 +953,72 @@ pub unsafe extern "C" fn step(p0: usize, e: usize, eof: i32) -> i32 {
                 if next != endq {
                     line += 1;
                 }
-                if nf == 1 && w == save_w + (if K >= 2 { 5 } else { 4 }) && !quoted {
-                    rare = true; // only stray CRs?
-                } else {
-                    if nf != width {
-                        w = fix_row(w, nf, wpos);
-                        if w == 0 {
-                            return ABORT;
-                        }
-                    }
-                    K += 1;
-                    p = next;
-                    continue 'records;
+                if nf == 1 && !quoted && w == save_w + (if kk >= 2 { 5 } else { 4 }) {
+                    break 'blocks; // only stray CRs?
                 }
+                if nf != width {
+                    REC_LINE = save_line;
+                    REC_K = kk;
+                    if nf > width {
+                        wpos = find_wpos(save_w + (if kk >= 2 { 3 } else { 2 }), width);
+                    }
+                    w = fix_row(w, nf, wpos);
+                    if w == 0 {
+                        return ABORT;
+                    }
+                }
+                kk += 1;
+                K = kk;
+                p = next;
+                if w >= flush_at {
+                    continue 'outer;
+                }
+                // the next record, in the same blocks
+                loop {
+                    if p + 64 > safe_e {
+                        continue 'outer;
+                    }
+                    let b = rd(p);
+                    if b == b'\\' {
+                        let c = rd(p + 1);
+                        if c == b'n' {
+                            p += 2;
+                            line += 1;
+                            continue;
+                        }
+                        if c == b'r' && rd(p + 2) == b'\\' && rd(p + 3) == b'n' {
+                            p += 4;
+                            line += 1;
+                            continue;
+                        }
+                    } else if b == b'"' {
+                        continue 'outer;
+                    }
+                    break;
+                }
+                rec_p = p;
+                save_w = w;
+                save_line = line;
+                wr(w, b',');
+                *((w + 1) as *mut u16) = 0x225b; // ["
+                w += 3;
+                nf = 1;
+                wpos = 0;
+                quoted = false;
+                last = p;
+                if p >= base + 64 {
+                    base = p;
+                    skip = p;
+                    carry = 0;
+                    continue 'blocks;
+                }
+                clr!(p);
             }
-            // the window ended first, or something rare: the per-field reader reads this record again
-            w = save_w;
-            line = save_line;
+            base += 64;
         }
+        // the window ended first, or something rare: the per-field reader reads this record again
+        w = save_w;
+        line = save_line;
         let r = slow_one(rec_p, w, line, e);
         if r != ONE_DONE {
             return r;
