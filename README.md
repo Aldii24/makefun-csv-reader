@@ -7,9 +7,8 @@
 Faster drop-in for make.fun's csv-reader 1.0.0. Same answers on every broken-CSV case, far less CPU.
 
 - `main.ts` only loads `stream.cjs` (CommonJS, so no ES module loader is started, and a tiny file for Node's type
-  stripping). V8's flag is set through the binding `node:v8` wraps (loading `node:v8` itself costs ~1.5 ms).
-- `stream.cjs` compiles `csv.wasm` (Liftoff only: one quick compile on the main thread, no optimizing recompile in the
-  background) and streams: it reads `cases.json` 256 KiB at a time into the module's memory, and
+  stripping). `stream.cjs` compiles `csv.wasm` (Liftoff only: one quick compile on the main thread, no optimizing
+  recompile in the background) and streams: it reads `cases.json` 256 KiB at a time into the module's memory, and
   the module (`core/src/lib.rs`, Rust `no_std`, wasm SIMD) reads each case's CSV straight from the JSON-escaped
   bytes, a record at a time, and writes the answer's rows as JSON bytes into a 256 KiB output window that goes to
   `answers.json` whenever it fills. No buffer ever holds the whole input or the whole output, so the memory touched

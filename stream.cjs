@@ -1,23 +1,11 @@
-// The harness runs `node /bot/main.ts` (node22), which only loads this file: it reads every case from /input/cases.json and writes
+// The harness runs `node /bot/main.ts` (node22): it reads every case from /input/cases.json and writes
 // /output/answers.json, one answer per case in order, each csv-reader 1.0.0's reading of the case's input (solve.js's run).
 // csv.wasm (core/src/lib.rs) reads each case's text straight from cases.json's bytes, 256 KiB at a time, and its
 // answer streams out the same way. Anything off the plain shape goes to fast.mjs / solve.js instead.
 const fs = require('node:fs');
 // Liftoff only: the module is compiled once, at its baseline tier, on this thread (no optimizing recompile in the
 // background, whose CPU time would count too).
-// (through the binding node:v8 wraps: loading node:v8 itself costs ~1.5 ms of CPU; deprecation warnings off for it)
-{
-  const flags = process.env.CSV_TEST_V8 || '--liftoff-only';
-  const nd = process.noDeprecation;
-  let b = null;
-  try {
-    process.noDeprecation = true;
-    b = process.binding('v8');
-  } catch {}
-  process.noDeprecation = nd;
-  if (b !== null && typeof b.setFlagsFromString === 'function') b.setFlagsFromString(flags);
-  else require('node:v8').setFlagsFromString(flags);
-}
+require('node:v8').setFlagsFromString(process.env.CSV_TEST_V8 || '--liftoff-only');
 const IN0 = 1 << 20, IN_END = 5 << 20, HOLE0 = 9 << 20, OUT0 = 10 << 20;
 const inPath = (process.env.MAKEFUN_INPUT_DIR || '/input') + '/cases.json';
 const outPath = (process.env.MAKEFUN_OUTPUT_DIR || '/output') + '/answers.json';
@@ -135,8 +123,6 @@ let ok = false;
 try {
   fast();
   ok = true;
-  // answers.json is written and closed: leave without the exit handlers' teardown
-  process.reallyExit(0);
 } catch {}
 if (!ok) {
   (async () => {
