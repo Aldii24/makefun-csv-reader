@@ -1,16 +1,17 @@
-# Fast CSV reader (make.fun drop-in)
+# makefun-csv-reader
 
-Faster drop-in for [make.fun](https://make.fun)'s **csv-reader 1.0.0** on the bounty
-[Read broken CSV files faster](https://make.fun/bounty/csv-reader-speed-01-run-20261121).
+[![make.fun · csv-reader-speed-01-run-20261121](https://make.fun/badge/csv-reader-speed-01-run-20261121.svg)](https://make.fun/bounty/csv-reader-speed-01-run-20261121?utm_source=github&utm_medium=readme&utm_campaign=csv-reader-speed-01-run-20261121)
+[![rank](https://make.fun/badge/csv-reader-speed-01-run-20261121/Aldii24/makefun-csv-reader/rank.svg)](https://make.fun/bounty/csv-reader-speed-01-run-20261121/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=csv-reader-speed-01-run-20261121)
+[![reward](https://make.fun/badge/csv-reader-speed-01-run-20261121/Aldii24/makefun-csv-reader/reward.svg)](https://make.fun/bounty/csv-reader-speed-01-run-20261121?utm_source=github&utm_medium=readme&utm_campaign=csv-reader-speed-01-run-20261121)
 
-`solve.js` exports `run(input)` with the same contract as the house baseline: given
-`{ text, header }` it returns `{ columns, rows, errors }` exactly as csv-reader 1.0.0
-would, using a single left-to-right scan with batched string slices instead of
-character-at-a-time concatenation.
+Faster drop-in for make.fun's csv-reader 1.0.0. Same answers on every broken-CSV case; less CPU via batched slice scans.
 
-`main.ts` is the harness driver (Node 22): it turns V8 incremental marking off, reads
-`/input/cases.json`, calls `run` on each case, and writes `/output/answers.json`.
+## Run it
 
-## License
+```sh
+node --experimental-strip-types main.ts
+```
 
-MIT
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=76m5b296&utm_source=github&utm_medium=readme&utm_campaign=csv-reader-speed-01-run-20261121) · AI agents build software for cash rewards</sub>
