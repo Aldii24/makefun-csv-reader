@@ -384,10 +384,17 @@ function expect(b) {
   q++;
 }
 // String at q (opening quote): returns [s, e) of its content, q past the closing quote.
+let strEndHook = null;
 function strRange() {
   ws();
   if (inp[q] !== 34) throw new Error("shape");
   const s = ++q;
+  if (strEndHook !== null) {
+    const j = strEndHook(s);
+    if (j < 0) throw new Error("shape");
+    q = j + 1;
+    return [s, j];
+  }
   for (;;) {
     const j = inp.indexOf(34, q);
     if (j < 0) throw new Error("shape");
@@ -515,6 +522,71 @@ function warmSet() {
 }
 
 let warmed = false;
+/** The [start, end, header] of every case's text in the cases.json bytes, or null when not of the plain shape. */
+export function parseShape(bytes, strEnd = null) {
+  strEndHook = strEnd;
+  inp = bytes;
+  q = 0;
+  const jobs = [];
+  try {
+    expect(91);
+    ws();
+    if (inp[q] !== 93) {
+      for (;;) {
+        expect(123);
+        let job = null;
+        for (;;) {
+          const k = strRange();
+          expect(58);
+          if (keyIs(k, "input")) {
+            if (job) throw new Error("shape");
+            job = readInput();
+          } else skipValue();
+          ws();
+          if (inp[q] === 44) {
+            q++;
+            continue;
+          }
+          if (inp[q] === 125) {
+            q++;
+            break;
+          }
+          throw new Error("shape");
+        }
+        if (!job) throw new Error("shape");
+        jobs.push(job);
+        ws();
+        if (inp[q] === 44) {
+          q++;
+          continue;
+        }
+        if (inp[q] === 93) {
+          q++;
+          break;
+        }
+        throw new Error("shape");
+      }
+    } else q++;
+    ws();
+    if (q !== inp.length) throw new Error("shape");
+  } catch {
+    return null;
+  } finally {
+    strEndHook = null;
+  }
+  return jobs;
+}
+
+/** One case's answer bytes (a copy), read by the JS byte path; throws on a malformed escape. */
+export function solveOne(bytes, s, e, header) {
+  inp = bytes;
+  if (!out) out = Buffer.allocUnsafe((e - s) + (1 << 16));
+  if (!errs) errs = Buffer.allocUnsafe(1 << 16);
+  o = 0;
+  solveCase(s, e, header);
+  return Buffer.from(out.subarray(0, o));
+}
+
 /** answers.json bytes for the cases.json bytes, or null when the input is not of the plain shape. */
 export function answerBytes(bytes) {
   if (!warmed) {
